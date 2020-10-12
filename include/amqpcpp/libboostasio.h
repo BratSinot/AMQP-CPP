@@ -25,10 +25,11 @@
  */
 #include <memory>
 
-#include <boost/asio/io_service.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/deadline_timer.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
+#include <boost/asio/dispatch.hpp>
 #include <boost/bind.hpp>
 #include <boost/function.hpp>
 
@@ -55,23 +56,23 @@ class LibBoostAsioHandler : public virtual TcpHandler
 protected:
 
     /**
-     *  Helper class that wraps a boost io_service socket monitor.
+     *  Helper class that wraps a boost io_context socket monitor.
      */
     class Watcher : public virtual std::enable_shared_from_this<Watcher>
     {
     private:
 
         /**
-         *  The boost asio io_service which is responsible for detecting events.
-         *  @var class boost::asio::io_service&
+         *  The boost asio io_context which is responsible for detecting events.
+         *  @var class boost::asio::io_context&
          */
-        boost::asio::io_service & _ioservice;
+        boost::asio::io_context & _iocontext;
 
-        using strand_weak_ptr = std::weak_ptr<boost::asio::io_service::strand>;
-        
+        using strand_weak_ptr = std::weak_ptr<boost::asio::io_context::strand>;
+
         /**
-         *  The boost asio io_service::strand managed pointer.
-         *  @var class std::shared_ptr<boost::asio::io_service>
+         *  The boost asio io_context::strand managed pointer.
+         *  @var class std::shared_ptr<boost::asio::io_context>
          */
         strand_weak_ptr _wpstrand;
 
@@ -112,7 +113,7 @@ protected:
         /**
          * Builds a io handler callback that executes the io callback in a strand.
          * @param  io_handler  The handler callback to dispatch
-         * @return handler_cb  A function wrapping the execution of the handler function in a io_service::strand.
+         * @return handler_cb  A function wrapping the execution of the handler function in a io_context::strand.
          */
         handler_cb get_dispatch_wrapper(io_handler fn)
         {
@@ -126,10 +127,10 @@ protected:
                     fn(boost::system::errc::make_error_code(boost::system::errc::operation_canceled), std::size_t{0});
                     return;
                 }
-                strand->dispatch(boost::bind(fn, ec, bytes_transferred));
+                boost::asio::dispatch(strand->context().get_executor(), boost::bind(fn, ec, bytes_transferred));
             };
         }
-        
+
         /**
          * Binds and returns a read handler for the io operation.
          * @param  connection   The connection being watched.
@@ -139,12 +140,12 @@ protected:
         handler_cb get_read_handler(TcpConnection *const connection, const int fd)
         {
             auto fn = boost::bind(&Watcher::read_handler,
-                                  this,
-                                  _1,
-                                  _2,
-                                  PTR_FROM_THIS(Watcher),
-                                  connection,
-                                  fd);
+                    this,
+                    _1,
+                    _2,
+                    PTR_FROM_THIS(Watcher),
+                    connection,
+                    fd);
             return get_dispatch_wrapper(fn);
         }
 
@@ -157,17 +158,17 @@ protected:
         handler_cb get_write_handler(TcpConnection *const connection, const int fd)
         {
             auto fn = boost::bind(&Watcher::write_handler,
-                                  this,
-                                  _1,
-                                  _2,
-                                  PTR_FROM_THIS(Watcher),
-                                  connection,
-                                  fd);
+                    this,
+                    _1,
+                    _2,
+                    PTR_FROM_THIS(Watcher),
+                    connection,
+                    fd);
             return get_dispatch_wrapper(fn);
         }
 
         /**
-         *  Handler method that is called by boost's io_service when the socket pumps a read event.
+         *  Handler method that is called by boost's io_context when the socket pumps a read event.
          *  @param  ec          The status of the callback.
          *  @param  bytes_transferred The number of bytes transferred.
          *  @param  awpWatcher  A weak pointer to this object.
@@ -176,10 +177,10 @@ protected:
          *  @note   The handler will get called if a read is cancelled.
          */
         void read_handler(const boost::system::error_code &ec,
-                          const std::size_t bytes_transferred,
-                          const std::weak_ptr<Watcher> awpWatcher,
-                          TcpConnection *const connection,
-                          const int fd)
+                const std::size_t bytes_transferred,
+                const std::weak_ptr<Watcher> awpWatcher,
+                TcpConnection *const connection,
+                const int fd)
         {
             // Resolve any potential problems with dangling pointers
             // (remember we are using async).
@@ -193,15 +194,15 @@ protected:
                 connection->process(fd, AMQP::readable);
 
                 _read_pending = true;
-                
+
                 _socket.async_read_some(
-                    boost::asio::null_buffers(),
-                    get_read_handler(connection, fd));
+                        boost::asio::null_buffers(),
+                        get_read_handler(connection, fd));
             }
         }
 
         /**
-         *  Handler method that is called by boost's io_service when the socket pumps a write event.
+         *  Handler method that is called by boost's io_context when the socket pumps a write event.
          *  @param  ec          The status of the callback.
          *  @param  bytes_transferred The number of bytes transferred.
          *  @param  awpWatcher  A weak pointer to this object.
@@ -210,10 +211,10 @@ protected:
          *  @note   The handler will get called if a write is cancelled.
          */
         void write_handler(const boost::system::error_code ec,
-                           const std::size_t bytes_transferred,
-                           const std::weak_ptr<Watcher> awpWatcher,
-                           TcpConnection *const connection,
-                           const int fd)
+                const std::size_t bytes_transferred,
+                const std::weak_ptr<Watcher> awpWatcher,
+                TcpConnection *const connection,
+                const int fd)
         {
             // Resolve any potential problems with dangling pointers
             // (remember we are using async).
@@ -229,25 +230,25 @@ protected:
                 _write_pending = true;
 
                 _socket.async_write_some(
-                    boost::asio::null_buffers(),
-                    get_write_handler(connection, fd));
+                        boost::asio::null_buffers(),
+                        get_write_handler(connection, fd));
             }
         }
 
     public:
         /**
-         *  Constructor- initialises the watcher and assigns the filedescriptor to 
+         *  Constructor- initialises the watcher and assigns the filedescriptor to
          *  a boost socket for monitoring.
-         *  @param  io_service      The boost io_service
-         *  @param  wpstrand        A weak pointer to a io_service::strand instance.
+         *  @param  io_context      The boost io_context
+         *  @param  wpstrand        A weak pointer to a io_context::strand instance.
          *  @param  fd              The filedescriptor being watched
          */
-        Watcher(boost::asio::io_service &io_service,
+        Watcher(boost::asio::io_context &io_context,
                 const strand_weak_ptr wpstrand,
                 const int fd) :
-            _ioservice(io_service),
-            _wpstrand(wpstrand),
-            _socket(_ioservice)
+                _iocontext(io_context),
+                _wpstrand(wpstrand),
+                _socket(_iocontext)
         {
             _socket.assign(fd);
 
@@ -287,8 +288,8 @@ protected:
                 _read_pending = true;
 
                 _socket.async_read_some(
-                    boost::asio::null_buffers(),
-                    get_read_handler(connection, fd));
+                        boost::asio::null_buffers(),
+                        get_read_handler(connection, fd));
             }
 
             // 2. Handle writes?
@@ -300,8 +301,8 @@ protected:
                 _write_pending = true;
 
                 _socket.async_write_some(
-                    boost::asio::null_buffers(),
-                    get_write_handler(connection, fd));
+                        boost::asio::null_buffers(),
+                        get_write_handler(connection, fd));
             }
         }
     };
@@ -314,16 +315,16 @@ protected:
     private:
 
         /**
-         *  The boost asio io_service which is responsible for detecting events.
-         *  @var class boost::asio::io_service&
+         *  The boost asio io_context which is responsible for detecting events.
+         *  @var class boost::asio::io_context&
          */
-        boost::asio::io_service & _ioservice;
+        boost::asio::io_context & _iocontext;
 
-        using strand_weak_ptr = std::weak_ptr<boost::asio::io_service::strand>;
+        using strand_weak_ptr = std::weak_ptr<boost::asio::io_context::strand>;
 
         /**
-         *  The boost asio io_service::strand managed pointer.
-         *  @var class std::shared_ptr<boost::asio::io_service>
+         *  The boost asio io_context::strand managed pointer.
+         *  @var class std::shared_ptr<boost::asio::io_context>
          */
         strand_weak_ptr _wpstrand;
 
@@ -344,11 +345,11 @@ protected:
         handler_fn get_handler(TcpConnection *const connection, const uint16_t timeout)
         {
             const auto fn = boost::bind(&Timer::timeout,
-                                  this,
-                                  _1,
-                                  PTR_FROM_THIS(Timer),
-                                  connection,
-                                  timeout);
+                    this,
+                    _1,
+                    PTR_FROM_THIS(Timer),
+                    connection,
+                    timeout);
 
             const strand_weak_ptr wpstrand = _wpstrand;
 
@@ -360,7 +361,7 @@ protected:
                     fn(boost::system::errc::make_error_code(boost::system::errc::operation_canceled));
                     return;
                 }
-                strand->dispatch(boost::bind(fn, ec));
+                boost::asio::dispatch(strand->context().get_executor(), boost::bind(fn, ec));
             };
         }
 
@@ -372,9 +373,9 @@ protected:
          *  @param  timeout
          */
         void timeout(const boost::system::error_code &ec,
-                     std::weak_ptr<Timer> awpThis,
-                     TcpConnection *const connection,
-                     const uint16_t timeout)
+                std::weak_ptr<Timer> awpThis,
+                TcpConnection *const connection,
+                const uint16_t timeout)
         {
             // Resolve any potential problems with dangling pointers
             // (remember we are using async).
@@ -409,14 +410,14 @@ protected:
     public:
         /**
          *  Constructor
-         *  @param  io_service The boost asio io_service.
-         *  @param  wpstrand   A weak pointer to a io_service::strand instance.
+         *  @param  io_context The boost asio io_context.
+         *  @param  wpstrand   A weak pointer to a io_context::strand instance.
          */
-        Timer(boost::asio::io_service &io_service,
-              const strand_weak_ptr wpstrand) :
-              _ioservice(io_service),
-              _wpstrand(wpstrand),
-              _timer(_ioservice)
+        Timer(boost::asio::io_context &io_context,
+                const strand_weak_ptr wpstrand) :
+                _iocontext(io_context),
+                _wpstrand(wpstrand),
+                _timer(_iocontext)
         {
 
         }
@@ -457,16 +458,16 @@ protected:
     };
 
     /**
-     *  The boost asio io_service.
-     *  @var class boost::asio::io_service&
+     *  The boost asio io_context.
+     *  @var class boost::asio::io_context&
      */
-    boost::asio::io_service & _ioservice;
+    boost::asio::io_context & _iocontext;
 
-    using strand_shared_ptr = std::shared_ptr<boost::asio::io_service::strand>;
+    using strand_shared_ptr = std::shared_ptr<boost::asio::io_context::strand>;
 
     /**
-     *  The boost asio io_service::strand managed pointer.
-     *  @var class std::shared_ptr<boost::asio::io_service>
+     *  The boost asio io_context::strand managed pointer.
+     *  @var class std::shared_ptr<boost::asio::io_context>
      */
     strand_shared_ptr _strand;
 
@@ -477,7 +478,7 @@ protected:
     std::map<int, std::shared_ptr<Watcher> > _watchers;
 
     /**
-     * The boost asio io_service::deadline_timer managed pointer.
+     * The boost asio io_context::deadline_timer managed pointer.
      * THIS IS DISABLED FOR NOW BECAUSE THIS BREAKS IF THERE IS MORE THAN ONE CONNECTION
      * @var class std::shared_ptr<Timer>
      */
@@ -490,8 +491,8 @@ protected:
      *  @param  flags       Should the object be monitored for readability or writability?
      */
     void monitor(TcpConnection *const connection,
-                 const int fd,
-                 const int flags) override
+            const int fd,
+            const int flags) override
     {
         // do we already have this filedescriptor
         auto iter = _watchers.find(fd);
@@ -503,8 +504,8 @@ protected:
             if (flags == 0){ return; }
 
             // construct a new pair (watcher/timer), and put it in the map
-            const std::shared_ptr<Watcher> apWatcher = 
-                std::make_shared<Watcher>(_ioservice, _strand, fd);
+            const std::shared_ptr<Watcher> apWatcher =
+                    std::make_shared<Watcher>(_iocontext, _strand, fd);
 
             _watchers[fd] = apWatcher;
 
@@ -556,12 +557,12 @@ public:
 
     /**
      *  Constructor
-     *  @param  io_service    The boost io_service to wrap
+     *  @param  io_context    The boost io_context to wrap
      */
-    explicit LibBoostAsioHandler(boost::asio::io_service &io_service) :
-        _ioservice(io_service),
-        _strand(std::make_shared<boost::asio::io_service::strand>(_ioservice))
-        //_timer(std::make_shared<Timer>(_ioservice,_strand))
+    explicit LibBoostAsioHandler(boost::asio::io_context &io_context) :
+            _iocontext(io_context),
+            _strand(std::make_shared<boost::asio::io_context::strand>(_iocontext))
+    //_timer(std::make_shared<Timer>(_iocontext,_strand))
     {
 
     }
@@ -575,12 +576,12 @@ public:
     LibBoostAsioHandler(const LibBoostAsioHandler &that) = delete;
 
     /**
-     *  Returns a reference to the boost io_service object that is being used.
-     *  @return The boost io_service object.
+     *  Returns a reference to the boost io_context object that is being used.
+     *  @return The boost io_context object.
      */
-    boost::asio::io_service &service()
+    boost::asio::io_context &service()
     {
-       return _ioservice;
+        return _iocontext;
     }
 
     /**
